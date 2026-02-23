@@ -3,7 +3,7 @@ import json
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
 from pathlib import Path
-from dataset import MrDataset, collate_visual_hash
+#from dataset import MrDataset, collate_visual_hash
 
 
 class FullMRIModel(torch.nn.Module):
@@ -87,52 +87,52 @@ class FullMRIModel(torch.nn.Module):
         self.clipvisualmodel.make_no_flashattn()
 
 
-if __name__ == '__main__':
-    # Example configuration
-    config = {
-        'clip_ckpt':
-        'tempmodelsavesite/scratch/checkpoints96bigvit/55.pt',
-        'diagnosis_heads_json':
-        'configs/jsons/combbest927.json',
-        'referral_heads_json':
-        'configs/jsons/combbest107referral.json',
-        'priority_head_ckpt':
-        'tempmodelsavesite/104-priority-notord/bestauc2_priority.pt'
-    }
+# if __name__ == '__main__':
+#     # Example configuration
+#     config = {
+#         'clip_ckpt':
+#         'tempmodelsavesite/scratch/checkpoints96bigvit/55.pt',
+#         'diagnosis_heads_json':
+#         'configs/jsons/combbest927.json',
+#         'referral_heads_json':
+#         'configs/jsons/combbest107referral.json',
+#         'priority_head_ckpt':
+#         'tempmodelsavesite/104-priority-notord/bestauc2_priority.pt'
+#     }
 
-    # Initialize model
-    fullmodel = FullMRIModel(config)
+#     # Initialize model
+#     fullmodel = FullMRIModel(config)
 
-    # Example inference
-    import copy
+#     # Example inference
+#     import copy
 
-    # Setup dataset and collator
-    retrodataset = MrDataset(
-        datajson='datajson/glmv8-3.json',
-        datarootdir='/scratch/tocho_root/tocho1/yiweilyu/glmv8-3/',
-        is_train=False,
-        vqvaename=
-        'TOKEN-MODEL-RESIZE-8-32-32-batch_permute-DATE-2024-04-02-0043AM',
-        series_dropout_rate=0.0,
-        percentage=5,
-        novisualaug=True,
-        nosplit=True,
-        forcereportfromcsv='chatgpt/shortenedreportsglmv8full.csv',
-        visualhashonly=True,
-        text_max_len=128,
-        tokenizer='biomed')
+#     # Setup dataset and collator
+#     retrodataset = MrDataset(
+#         datajson='datajson/glmv8-3.json',
+#         datarootdir='/scratch/tocho_root/tocho1/yiweilyu/glmv8-3/',
+#         is_train=False,
+#         vqvaename=
+#         'TOKEN-MODEL-RESIZE-8-32-32-batch_permute-DATE-2024-04-02-0043AM',
+#         series_dropout_rate=0.0,
+#         percentage=5,
+#         novisualaug=True,
+#         nosplit=True,
+#         forcereportfromcsv='chatgpt/shortenedreportsglmv8full.csv',
+#         visualhashonly=True,
+#         text_max_len=128,
+#         tokenizer='biomed')
 
-    collator = collatevisualhash(copy.deepcopy(
-        fullmodel.clipmodel.patchifier).cpu(),
-                                 'cuda:0',
-                                 True,
-                                 True,
-                                 puttodevice=True)
+#     collator = collatevisualhash(copy.deepcopy(
+#         fullmodel.clipmodel.patchifier).cpu(),
+#                                  'cuda:0',
+#                                  True,
+#                                  True,
+#                                  puttodevice=True)
 
-    # Run inference
-    with torch.no_grad(), torch.amp.autocast(device_type='cuda',
-                                             dtype=torch.float16):
-        fullmodel = fullmodel.half().cuda()
-        sample = collator([retrodataset.find_by_hash('BRAIN_UM_3B6FE29D')])
-        result = fullmodel(sample)
-        print(result)
+#     # Run inference
+#     with torch.no_grad(), torch.amp.autocast(device_type='cuda',
+#                                              dtype=torch.float16):
+#         fullmodel = fullmodel.half().cuda()
+#         sample = collator([retrodataset.find_by_hash('BRAIN_UM_3B6FE29D')])
+#         result = fullmodel(sample)
+#         print(result)

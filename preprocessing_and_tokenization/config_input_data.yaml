@@ -1,0 +1,10 @@
+dataset_dir: "/path/to/dataset"
+output_dir: "Prima_training_and_evaluation/fake_data"
+tokenizer_model_config: "/path/to/tokenizer_model_config.yaml"
+
+vqvaename: "FAKE_TOKENIZER"
+max_tokens_per_chunk: 400
+device: "cuda"
+
+study_description: ""
+report_text: ""

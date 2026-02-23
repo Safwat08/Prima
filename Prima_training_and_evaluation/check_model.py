@@ -1,8 +1,3 @@
 import torch
 
-checkpoint = torch.load('fullmodel107.pt', map_location='cpu')
-
-
-if isinstance(checkpoint, dict):
-    for key in checkpoint.keys():
-        print(key)
+checkpoint = torch.load('Prima_training_and_evaluation/ckpts/fullmodel107.pt', map_location='cpu', weights_only=False)

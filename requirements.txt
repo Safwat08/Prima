@@ -23,4 +23,4 @@ einops==0.8.1
 nibabel==5.3.2
 pydicom==2.4.4
 wandb==0.16.6
-flash-attn==2.7.4.post1
+#flash-attn==2.7.4.post1

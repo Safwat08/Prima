@@ -5,7 +5,7 @@ import heapq
 sys.path.append(os.getcwd())
 from tqdm import tqdm
 from sklearn import metrics
-from dataset import collatevisualhash, collateembhash, MrDataset
+from dataset import collate_visual_hash, MrDataset
 
 import numpy as np
 try:
@@ -14,6 +14,11 @@ except ImportError:
     wandb = None
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+
+def collate_emb_hash(datas):
+    tensors, labels, hashes = zip(*datas)
+    return torch.stack(tensors), torch.LongTensor(labels), list(hashes)
 
 
 class ClassificationTask:
@@ -43,9 +48,11 @@ class ClassificationTask:
         loader = torch.utils.data.DataLoader(dataset,
                                              batch_size=protobatchsize,
                                              shuffle=False,
-                                             num_workers=12,
-                                             collate_fn=collatevisualhash(
-                                                 patchify, device))
+                                             num_workers=0,
+                                             collate_fn=collate_visual_hash(
+                                                 patchify,
+                                                 device,
+                                                 put_to_device=True))
         with torch.no_grad():
             for d in tqdm(loader):
                 h = d['hash']
@@ -86,7 +93,7 @@ class ClassificationTask:
         trainloader = torch.utils.data.DataLoader(self.trainembedsbalanced,
                                                   batch_size=batch_size,
                                                   shuffle=True,
-                                                  collate_fn=collateembhash)
+                                                  collate_fn=collate_emb_hash)
         totalloss = 0.0
         totals = 0
 
@@ -123,7 +130,7 @@ class ClassificationTask:
 
         loader = torch.utils.data.DataLoader(embeds,
                                              batch_size=batch_size,
-                                             collate_fn=collateembhash)
+                                             collate_fn=collate_emb_hash)
         classnum = self.classnum
         totalloss = 0.0
         totals = 0
@@ -204,12 +211,32 @@ def emptylist(num):
 
 
 # load clip-trained vision model
+# load clip-trained vision model
 def loadvismodel(path, devices):
-    m = torch.load(path, map_location='cpu')
-    model = torch.nn.DataParallel(m.module.visual_model,
-                                  device_ids=devices).to(device)
+    m = torch.load(path, map_location='cpu', weights_only=False)
+    base = m.module if hasattr(m, "module") else m
+
+    # visual encoder can live under different names depending on checkpoint type
+    if hasattr(base, "clipvisualmodel"):          # FullMRIModel
+        visual = base.clipvisualmodel
+    elif hasattr(base, "visual_model"):           # CLIP model
+        visual = base.visual_model
+    else:
+        raise AttributeError("Could not find visual model on loaded checkpoint")
+
+    model = torch.nn.DataParallel(visual, device_ids=devices).to(device)
     model.module.patdis = False
-    return model, m.module.patchifier.to('cpu')
+
+    # patchifier location differs too
+    if hasattr(base, "patchifier"):
+        patchifier = base.patchifier
+    elif hasattr(base, "clipmodel") and hasattr(base.clipmodel, "patchifier"):
+        patchifier = base.clipmodel.patchifier
+    else:
+        raise AttributeError("Could not find patchifier on loaded checkpoint")
+
+    return model, patchifier.to("cpu")
+
 
 
 # main training loop for a specific checkpoint
@@ -359,16 +386,16 @@ if __name__ == '__main__':
     cf_fd = parse_args()
     config = yaml.load(cf_fd, Loader=yaml.FullLoader)
     thedataset = MrDataset
-    protodataset = thedataset(datajson=config['data']['datajson'],
-                              datarootdir=config['data']['datarootdir'],
+    protodataset = thedataset(data_json=config['data']['datajson'],
+                              data_root_dir=config['data']['datarootdir'],
                               tokenizer='biomed',
                               text_max_len=200,
                               is_train=True,
-                              vqvaename=config['data']['vqvaename'],
-                              visualhashonly=True,
+                              vqvae_name=config['data']['vqvaename'],
+                              visual_hash_only=True,
                               percentage=config['data']['percentage'],
-                              novisualaug=True,
-                              nosplit=config['data']['nosplit']
+                              no_visual_aug=True,
+                              no_split=config['data']['nosplit']
                               if 'nosplit' in config['data'] else False)
     if 'vismodelpath' not in config['train']:
         raise ValueError('Missing required config key: train.vismodelpath')

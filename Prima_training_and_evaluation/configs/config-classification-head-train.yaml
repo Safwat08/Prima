@@ -1,14 +1,14 @@
 data:
         batch_size: 32
-        datajson: 'fake_data/datajson.json' # the datajson file storing details of each study and sequence
-        datarootdir: 'fake_data/data' # root dir of where the data is stored
+        datajson: 'Prima_training_and_evaluation/fake_data/datajson.json' # the datajson file storing details of each study and sequence
+        datarootdir: 'Prima_training_and_evaluation/fake_data/data' # root dir of where the data is stored
         vqvaename: 'FAKE_TOKENIZER' # name of the VQ-VAE
         percentage: 5
         nosplit: true
 
 train:
         devices: [0]
-        vismodelpath: 'ckpts/fullmodel107.pt' # path to pre-trained full model checkpoint (e.g., fullmodel107.pt)
+        vismodelpath: 'Prima_training_and_evaluation/ckpts/fullmodel107.pt' # path to pre-trained full model checkpoint (e.g., fullmodel107.pt)
         epochs: 50
         lr: 0.00001
         momentum: 0.0
@@ -17,8 +17,8 @@ train:
         use_wandb: false
         wandb_project: 'prima'
         wandb_entity: null
-        wandb_run_name: 'classification_dry_run_fakeadata'
-        ckptsavedir: ckpts/
+        wandb_run_name: 'classification_dryrun_fakeadata'
+        ckptsavedir: Prima_training_and_evaluation/ckpts/
         nums: ['last']
         retpool: true
 cset:
@@ -26,6 +26,6 @@ cset:
         markdate: '2025-fake-data-heads'
         classnum: 4
         names: ['fake_class_0', 'fake_class_1', 'fake_class_2', 'fake_class_3']
-        train_csv: 'fake_data/retrospective_classification/train_labels.csv' # csv with two columns: study_id,class_id
-        val_csv: 'fake_data/retrospective_classification/val_labels.csv' # csv with two columns: study_id,class_id
-        test_csv: 'fake_data/retrospective_classification/test_labels.csv' # csv with two columns: study_id,class_id
+        train_csv: 'Prima_training_and_evaluation/fake_data/retrospective_classification/train_labels.csv' # csv with two columns: study_id,class_id
+        val_csv: 'Prima_training_and_evaluation/fake_data/retrospective_classification/val_labels.csv' # csv with two columns: study_id,class_id
+        test_csv: 'Prima_training_and_evaluation/fake_data/retrospective_classification/test_labels.csv' # csv with two columns: study_id,class_id

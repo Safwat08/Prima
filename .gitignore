@@ -1,3 +1,38 @@
 *__pycache__*
 test
 configs/test_pipeline_config_2.yaml
+
+# Model checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Embeddings / tensors / arrays
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.joblib
+*.msgpack
+*.parquet
+*.feather
+
+# Imaging / raw data files
+*.nii
+*.nii.gz
+*.dcm
+*.mha
+*.mhd
+*.nrrd
+*.img
+*.hdr
+
+# Data and embedding directories
+**/data/
+**/fake_data/
+**/emb/
+**/embeddings/
+**/stacked/
