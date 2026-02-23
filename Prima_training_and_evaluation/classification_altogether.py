@@ -1,13 +1,17 @@
 import torch
 import sys, os, csv
+import heapq
 
 sys.path.append(os.getcwd())
 from tqdm import tqdm
 from sklearn import metrics
 from dataset import collatevisualhash, collateembhash, MrDataset
 
-from utils import getbestthresh
 import numpy as np
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -17,16 +21,23 @@ class ClassificationTask:
     def __init__(self,
                  dataset,
                  visualmodel,
-                 poslist,
+                 trainlabels,
+                 vallabels,
+                 testlabels,
                  patchify,
                  protobatchsize=12,
-                 vallist=None,
+                 classnum=1,
                  retpool=True):
 
         self.allembeds = []
-        self.vallistnames = vallist
-
-        self.vallist = [open(v).read().split('\n') for v in vallist]
+        self.classnum = classnum
+        self.trainlabels = trainlabels
+        self.vallabels = vallabels
+        self.testlabels = testlabels
+        self.alllabels = {}
+        self.alllabels.update(trainlabels)
+        self.alllabels.update(vallabels)
+        self.alllabels.update(testlabels)
 
         # obtain visual embeddings from pre-trained clip visual model
         loader = torch.utils.data.DataLoader(dataset,
@@ -41,37 +52,33 @@ class ClassificationTask:
                 with torch.amp.autocast(device_type='cuda',
                                         dtype=torch.float16):
                     embeds = visualmodel(xdict=d, retpool=retpool)
-                labels = [[(1 if (hh in pl) else 0) for pl in poslist]
-                          for hh in h]
-                for i, (tensor, label) in enumerate(zip(embeds, labels)):
-                    self.allembeds.append((tensor.float(), label, h[i]))
+                for i, (tensor, hashname) in enumerate(zip(embeds, h)):
+                    if hashname in self.alllabels:
+                        self.allembeds.append(
+                            (tensor.float(), self.alllabels[hashname], hashname))
 
-        # obtain label for each diagnosis
-        for i in range(len(self.allembeds)):
-            t, l, h = self.allembeds[i]
-            self.allembeds[i] = (t, [(1 if h in pl else 0)
-                                     for pl in poslist], h)
-
-        # split into train set and val set
-        self.trainembeds, self.valembeds = self.split(self.allembeds)
+        # split into train/val/test sets
+        self.trainembeds, self.valembeds, self.testembeds = self.split(
+            self.allembeds)
 
         print(len(self.valembeds))
+        print(len(self.testembeds))
 
-        # compute BCE pos weights
+        # compute class weights for multiclass CE
         ttotals = len(self.trainembeds)
-        ones = torch.zeros(len(poslist)).long()
+        counts = torch.zeros(self.classnum).long()
         for _, l, _ in self.trainembeds:
-            ones += torch.LongTensor(l)
-        rest = ttotals - ones
-        ratios = rest / ones
+            counts[l] += 1
+        safe_counts = counts.clamp(min=1)
+        weights = ttotals / (self.classnum * safe_counts.float())
         print('train totals: ' + str(ttotals))
-        print('train ones: ' + str(ones))
-        print('ratio: ' + str(ratios))
+        print('train class counts: ' + str(counts))
+        print('class weights: ' + str(weights))
 
         self.trainembedsbalanced = self.trainembeds
-        self.criterionweighted = torch.nn.BCEWithLogitsLoss(
-            pos_weight=torch.FloatTensor(ratios).to(device))
-        self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.criterionweighted = torch.nn.CrossEntropyLoss(weight=weights.to(
+            device))
+        self.criterion = torch.nn.CrossEntropyLoss()
         self.softmax = torch.nn.Softmax(dim=1)
         self.visembedlen = len(self.allembeds[0][0])
 
@@ -80,21 +87,17 @@ class ClassificationTask:
                                                   batch_size=batch_size,
                                                   shuffle=True,
                                                   collate_fn=collateembhash)
-        valloader = torch.utils.data.DataLoader(self.valembeds,
-                                                batch_size=batch_size,
-                                                collate_fn=collateembhash)
         totalloss = 0.0
         totals = 0
-        classnum = len(self.vallist)
 
         # train for 1 epoch
         for t, l, h in tqdm(trainloader):
             t = t.to(device)
             t *= (torch.randn_like(t) * 0.01 + 1)
-            l = l.to(device)
+            l = l.to(device).long()
             optimizer.zero_grad()
             out = model(t)
-            loss = self.criterionweighted(out, l.float())
+            loss = self.criterionweighted(out, l)
             loss.backward()
             optimizer.step()
             totalloss += loss.item() * len(l)
@@ -102,91 +105,94 @@ class ClassificationTask:
 
         # run validation set
         trainloss = totalloss / totals
+        valloss, valacc, valauc, correctposlist, correctneglist, fullprob = self.evalsplit(
+            model, self.valembeds)
+        testloss, testacc, testauc, testpos, testneg, testprob = self.evalsplit(
+            model, self.testembeds)
+
+        return trainloss, valloss, valacc, valauc, correctposlist, correctneglist, fullprob, [
+            None
+        ] * self.classnum, testloss, testacc, testauc, testpos, testneg
+
+    def evalsplit(self, model, embeds, batch_size=200):
+        if embeds is None or len(embeds) == 0:
+            return 0.0, [0.0] * self.classnum, [float('nan')] * self.classnum, [
+                0
+            ] * self.classnum, [0] * self.classnum, np.zeros(
+                (0, self.classnum), dtype=np.float32)
+
+        loader = torch.utils.data.DataLoader(embeds,
+                                             batch_size=batch_size,
+                                             collate_fn=collateembhash)
+        classnum = self.classnum
         totalloss = 0.0
         totals = 0
-        corrects = []
-        fullpred = []
+        fullprob = []
         fulllabels = []
-        correctpos = []
-        correctneg = []
-        embedpreds = []
-        valsetindexmap = [[] for i in range(classnum)]
+        fullpreds = []
         with torch.no_grad():
-            for t, l, h in valloader:
+            for t, l, h in loader:
                 t = t.to(device)
-                ll = l.to(device)
+                ll = l.to(device).long()
                 out = model(t)
-                loss = self.criterion(out, ll.float())
+                prob = self.softmax(out)
+                pred = prob.argmax(dim=1).cpu()
+                loss = self.criterion(out, ll)
                 totalloss += loss.item() * len(l)
                 totals += len(l)
                 for i in range(len(l)):
-                    pred = (out[i] > 0).long().cpu()
-                    correctpos.append(
-                        torch.logical_and(pred == 1, l[i] == 1).long())
-                    correctneg.append(
-                        torch.logical_and(pred == 0, l[i] == 0).long())
-                    corrects.append((pred == l[i]).long())
-                    fullpred.append(out[i])
+                    fullpreds.append(pred[i].item())
+                    fullprob.append(prob[i].cpu().numpy())
                     fulllabels.append(l[i])
-                    embedpreds.append((t[i], pred))
-                    for j in range(classnum):
-                        if h[i] in self.vallist[j]:
-                            valsetindexmap[j].append(len(fullpred) - 1)
 
-        # calculate val metrics
-        valloss = totalloss / totals
-        fullpred = torch.stack(fullpred).detach().cpu().numpy()
+        # calculate metrics
+        valloss = totalloss / totals if totals > 0 else 0.0
+        fullprob = np.array(fullprob)
+        fullpreds = np.array(fullpreds)
         fulllabels = torch.stack(fulllabels).detach().cpu().numpy()
         valacc = []
         valauc = []
         correctposlist = []
         correctneglist = []
-        bestthreshs = []
         for j in range(classnum):
-            correctssum = 0
-            correctpossum = 0
-            correctnegsum = 0
-            values = []
-            gts = []
-            for i in valsetindexmap[j]:
-                correctssum += corrects[i][j]
-                correctpossum += correctpos[i][j]
-                correctnegsum += correctneg[i][j]
-                values.append(fullpred[i][j])
-                gts.append(fulllabels[i][j])
-            valacc.append(correctssum / len(valsetindexmap[j]))
-            valauc.append(metrics.roc_auc_score(gts, values))
-            correctposlist.append(correctpossum)
-            correctneglist.append(correctnegsum)
-            bestthreshs.append(
-                getbestthresh(gts, values)
-            )  # get the best cutoff threshold for binary classification
+            if len(fulllabels) == 0:
+                valacc.append(0.0)
+                valauc.append(float('nan'))
+                correctposlist.append(0)
+                correctneglist.append(0)
+                continue
+            gts_np = (fulllabels == j).astype(np.int32)
+            pred_bin_np = (fullpreds == j).astype(np.int32)
+            values = fullprob[:, j]
+            valacc.append(float((pred_bin_np == gts_np).mean()))
+            if len(np.unique(gts_np)) < 2:
+                valauc.append(float('nan'))
+            else:
+                valauc.append(metrics.roc_auc_score(gts_np, values))
+            correctposlist.append(int(np.logical_and(pred_bin_np == 1,
+                                                     gts_np == 1).sum()))
+            correctneglist.append(int(np.logical_and(pred_bin_np == 0,
+                                                     gts_np == 0).sum()))
 
-        return trainloss, valloss, valacc, valauc, correctposlist, correctneglist, (
-            fullpred > 0).astype(np.int32), bestthreshs
+        return valloss, valacc, valauc, correctposlist, correctneglist, fullprob
 
     def split(self, pairs):
-        # split all embeddings into training set and validation set, for classification head training purposes only
+        # split embeddings into train/val/test sets
         vals = []
+        tests = []
         trains = []
-        fullvallist = []
-        valhashset = set([])
-        for vl in self.vallist:
-            fullvallist += vl
-        fullvallistset = set(fullvallist)
+        trainhashset = set(self.trainlabels.keys())
+        valhashset = set(self.vallabels.keys())
+        testhashset = set(self.testlabels.keys())
         print(len(pairs))
         for t, l, h in pairs:
-            if h in fullvallistset:
-                if h not in valhashset:
-                    vals.append((t, l, h))
-                    valhashset.add(h)
-                    fullvallistset.remove(h)
-                else:
-                    print('weird')
-            else:
+            if h in trainhashset:
                 trains.append((t, l, h))
-        print(fullvallistset)
-        return trains, vals
+            elif h in valhashset:
+                vals.append((t, l, h))
+            elif h in testhashset:
+                tests.append((t, l, h))
+        return trains, vals, tests
 
 
 # create empty list
@@ -209,19 +215,27 @@ def loadvismodel(path, devices):
 # main training loop for a specific checkpoint
 def train(protodataset,
           vismodelpath,
-          poslist,
-          vallist=None,
+          trainlabels,
+          vallabels,
+          testlabels,
           epochs=45,
           classnum=1,
           devices=[0],
           savesite='.',
-          cnames=[]):
+          cnames=[],
+          lr=0.00001,
+          momentum=0.0,
+          weight_decay=0.0,
+          top_k=5,
+          wandb_run=None):
     vismodel, patchify = loadvismodel(vismodelpath, devices)
     cls = ClassificationTask(protodataset,
                              vismodel,
-                             poslist,
+                             trainlabels,
+                             vallabels,
+                             testlabels,
                              patchify,
-                             vallist=vallist)
+                             classnum=classnum)
     bestvauc = emptylist(classnum)
     bestvacc = emptylist(classnum)
     bestaucfpred = [[] for i in range(classnum)]
@@ -233,29 +247,101 @@ def train(protodataset,
                                    torch.nn.Linear(1000, classnum))
     newmodel = torch.nn.DataParallel(
         newmodel, device_ids=config['train']['devices']).to(device)
-    optim = torch.optim.RMSprop(newmodel.parameters(), lr=0.00001)
+    optim = torch.optim.RMSprop(newmodel.parameters(),
+                                lr=lr,
+                                momentum=momentum,
+                                weight_decay=weight_decay)
+    topk_heap = []
     for e in range(epochs):
-        tloss, vloss, vacc, vauc, cpos, cneg, fpred, threshs = cls.trainandval(
+        tloss, vloss, vacc, vauc, cpos, cneg, fpred, threshs, tloss_test, testacc, testauc, testpos, testneg = cls.trainandval(
             newmodel, optim)
+        finite_vauc = [x for x in vauc if not np.isnan(x)]
+        mean_vauc = float(np.mean(finite_vauc)) if len(finite_vauc) > 0 else float(
+            'nan')
+        finite_vacc = [x for x in vacc if not np.isnan(x)]
+        mean_vacc = float(np.mean(finite_vacc)) if len(finite_vacc) > 0 else float(
+            'nan')
+        finite_testauc = [x for x in testauc if not np.isnan(x)]
+        mean_testauc = float(np.mean(
+            finite_testauc)) if len(finite_testauc) > 0 else float('nan')
+        finite_testacc = [x for x in testacc if not np.isnan(x)]
+        mean_testacc = float(np.mean(
+            finite_testacc)) if len(finite_testacc) > 0 else float('nan')
         print('epoch ' + str(e) + ' train loss: ' + str(tloss))
         print('epoch ' + str(e) + ' val loss: ' + str(vloss))
+        print('epoch ' + str(e) + ' mean val acc: ' + str(mean_vacc))
+        print('epoch ' + str(e) + ' mean val auc: ' + str(mean_vauc))
         print('epoch ' + str(e) + ' val acc: ' + str(vacc))
         print('epoch ' + str(e) + ' val auc: ' + str(vauc))
         print('epoch ' + str(e) + ' val correct positive: ' + str(cpos))
         print('epoch ' + str(e) + ' val correct negative: ' + str(cneg))
+        print('epoch ' + str(e) + ' test loss: ' + str(tloss_test))
+        print('epoch ' + str(e) + ' mean test acc: ' + str(mean_testacc))
+        print('epoch ' + str(e) + ' mean test auc: ' + str(mean_testauc))
+        print('epoch ' + str(e) + ' test acc: ' + str(testacc))
+        print('epoch ' + str(e) + ' test auc: ' + str(testauc))
+        print('epoch ' + str(e) + ' test correct positive: ' + str(testpos))
+        print('epoch ' + str(e) + ' test correct negative: ' + str(testneg))
+        if wandb_run is not None:
+            wandb_run.log({
+                'epoch': e,
+                'train/loss': tloss,
+                'val/loss': vloss,
+                'val/mean_acc': mean_vacc,
+                'val/mean_auc': mean_vauc,
+                'test/loss': tloss_test,
+                'test/mean_acc': mean_testacc,
+                'test/mean_auc': mean_testauc,
+            })
+
+        # save top-k checkpoints based on mean validation AUC
+        if not np.isnan(mean_vauc):
+            ckpt_name = f'top_valauc_epoch{e:03d}_{mean_vauc:.6f}.pt'
+            ckpt_path = os.path.join(savesite, ckpt_name)
+            torch.save(newmodel.module, ckpt_path)
+            heapq.heappush(topk_heap, (mean_vauc, ckpt_path))
+            if len(topk_heap) > top_k:
+                _, remove_path = heapq.heappop(topk_heap)
+                if os.path.exists(remove_path):
+                    os.remove(remove_path)
 
         # save best checkpoints for each task
         for i in range(classnum):
+            if np.isnan(vauc[i]):
+                continue
             if vauc[i] > bestvauc[i]:
                 bestvauc[i] = vauc[i]
+                bestvacc[i] = vacc[i]
                 bestaucfpred[i] = fpred[:, i]
-                newmodel.module.thresh = threshs[i]
                 torch.save(newmodel.module,
                            savesite + '/bestauc_' + cnames[i] + '.pt')
     return bestvauc, bestvacc, bestaucfpred, bestaccfpred, cls
 
 
 import yaml, argparse
+
+
+def load_label_csv(path, classnum):
+    mapping = {}
+    with open(path) as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) < 2:
+                continue
+            study_id = row[0].strip()
+            label_raw = row[1].strip()
+            if study_id == '':
+                continue
+            try:
+                label = int(label_raw)
+            except ValueError:
+                # allow header like study_id,class
+                continue
+            if label < 0 or label >= classnum:
+                raise ValueError(
+                    f'label out of range in {path}: {study_id},{label}')
+            mapping[study_id] = label
+    return mapping
 
 
 def parse_args():
@@ -284,37 +370,47 @@ if __name__ == '__main__':
                               novisualaug=True,
                               nosplit=config['data']['nosplit']
                               if 'nosplit' in config['data'] else False)
-    nums = config['train']['nums']
-    paths = [(config['train']['ckptsavedir'] + '/' + str(num) + '.pt', num)
-             for num in nums]
-    poslist = [
-        open(pl).read().split('\n') for pl in config['cset']['txtnames']
-    ]
-    vallists = config['cset']['vallists']
-    bestaucs = []
-    bestaccs = []
+    if 'vismodelpath' not in config['train']:
+        raise ValueError('Missing required config key: train.vismodelpath')
+    vismodelpath = config['train']['vismodelpath']
+    classnum = config['cset']['classnum']
+    trainlabels = load_label_csv(config['cset']['train_csv'], classnum)
+    vallabels = load_label_csv(config['cset']['val_csv'], classnum)
+    testlabels = load_label_csv(config['cset']['test_csv'], classnum)
     mysavesite = config['cset']['savesite']
     os.system('mkdir ' + mysavesite + '/' + config['cset']['markdate'])
+    run = None
+    if config['train'].get('use_wandb', False):
+        if wandb is None:
+            raise ImportError(
+                'wandb is not installed. Install it or set train.use_wandb to false.'
+            )
+        run = wandb.init(project=config['train'].get('wandb_project',
+                                                     'prima-classification'),
+                         entity=config['train'].get('wandb_entity', None),
+                         name=config['train'].get('wandb_run_name', None),
+                         config=config)
 
-    # run classification head training and validation for each included checkpoint
-    for path, num in paths:
-        bestvauc, bestvacc, bestaucfpred, bestaccfpred, cls = train(
-            protodataset,
-            path,
-            poslist,
-            vallist=vallists,
-            epochs=config['train']['epochs'],
-            classnum=config['cset']['classnum'],
-            savesite=mysavesite + '/' + config['cset']['markdate'],
-            cnames=config['cset']['names'],
-            devices=config['train']['devices'])
-        print(path + ' best val auc: ' + str(bestvauc))
-        bestaucs.append(bestvauc)
-        bestaccs.append(bestvacc)
+    bestvauc, bestvacc, bestaucfpred, bestaccfpred, cls = train(
+        protodataset,
+        vismodelpath,
+        trainlabels,
+        vallabels,
+        testlabels,
+        epochs=config['train']['epochs'],
+        classnum=classnum,
+        savesite=mysavesite + '/' + config['cset']['markdate'],
+        cnames=config['cset']['names'],
+        devices=config['train']['devices'],
+        lr=config['train'].get('lr', 0.00001),
+        momentum=config['train'].get('momentum', 0.0),
+        weight_decay=config['train'].get('weight_decay', 0.0),
+        top_k=config['train'].get('save_top_k', 5),
+        wandb_run=run)
+    if run is not None:
+        run.finish()
+    print(vismodelpath + ' best val auc: ' + str(bestvauc))
     print('best auc and acc:')
-
-    i = 0
-    for auc, acc in zip(bestaucs, bestaccs):
+    for i, (auc, acc) in enumerate(zip(bestvauc, bestvacc)):
         print(config['cset']['names'][i] + ' auc and acc:')
         print(str(auc) + ' ' + str(acc))
-        i += 1

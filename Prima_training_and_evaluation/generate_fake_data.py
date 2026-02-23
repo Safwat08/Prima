@@ -21,7 +21,8 @@ study_desc = list(study_desc)
 # make a single fake study
 def fake_study_gen(hash):
     os.mkdir('fake_data/data/' + hash)
-    seqnum = random.randint(4, 8)  # randomly determine the number of sequences
+    #seqnum = random.randint(4, 8)  # randomly determine the number of sequences
+    seqnum = 2
     seqnames = random.sample(sequence_names,
                              k=seqnum)  # determine name of sequences
     seqs = []
@@ -113,10 +114,46 @@ def divide_into_sublists(data, num_sublists=101):
     return sublists
 
 
+def get_sampling_pool(hashes):
+    # For large datasets, avoid the first few studies as before.
+    if len(hashes) > 100:
+        end = max(101, len(hashes) - 50)
+        pool = hashes[100:end]
+        if len(pool) > 0:
+            return pool
+    return hashes
+
+
+def write_classification_files(hashes, outdir, make_val_split=False):
+    pool = get_sampling_pool(hashes)
+    for classname in classes:
+        requested = random.randint(400, 800)
+        num_pos = min(requested, len(pool))
+        poses = random.sample(pool, k=num_pos) if num_pos > 0 else []
+
+        f = open(outdir + '/' + classname + '.txt', 'w+')
+        f.write('\n'.join(poses))
+        f.close()
+
+        if not make_val_split:
+            continue
+
+        val_pos_count = min(100, len(poses))
+        pos_set = set(poses)
+        non_pos = [h for h in hashes if h not in pos_set]
+        val_neg_count = min(100, len(non_pos))
+        negs = random.sample(non_pos, k=val_neg_count) if val_neg_count > 0 else []
+        vals = poses[:val_pos_count] + negs
+
+        f = open(outdir + '/' + classname + '_val.txt', 'w+')
+        f.write('\n'.join(vals))
+        f.close()
+
+
 # generate data json
 datajson = []
 hashes = []
-for i in tqdm(range(2000)):
+for i in tqdm(range(100)):
     h = 'BRAIN_FAKE_' + str(10000 + i)
     ret = fake_study_gen(h)
     hashes.append(h)
@@ -131,30 +168,14 @@ for data in datajson:
 
 # generate fake classification data and val splits
 os.mkdir('fake_data/retrospective_classification')
-for classname in classes:
-    num = random.randint(400, 800)
-    poses = random.sample(hashes[100:1950], k=num)
-    f = open('fake_data/retrospective_classification/' + classname + '.txt',
-             'w+')
-    f.write('\n'.join(poses))
-    f.close()
-    negs = []
-    i = 0
-    while len(negs) < 100:
-        if hashes[i] not in poses:
-            negs.append(hashes[i])
-        i += 1
-    vals = poses[0:100] + negs
-    f = open(
-        'fake_data/retrospective_classification/' + classname + '_val.txt',
-        'w+')
-    f.write('\n'.join(vals))
-    f.close()
+write_classification_files(hashes,
+                           'fake_data/retrospective_classification',
+                           make_val_split=True)
 
 # generate fake prospective data json
 datajson = []
 hashes = []
-for i in tqdm(range(2000)):
+for i in tqdm(range(100)):
     h = 'BRAIN_FAKE_' + str(20000 + i)
     ret = fake_study_gen(h)
     hashes.append(h)
@@ -170,13 +191,7 @@ for h in hashes:
 
 # generate fake classification data for prospectives
 os.mkdir('fake_data/prospective_classification')
-for classname in classes:
-    num = random.randint(400, 800)
-    poses = random.sample(hashes[100:1950], k=num)
-    f = open('fake_data/prospective_classification/' + classname + '.txt',
-             'w+')
-    f.write('\n'.join(poses))
-    f.close()
+write_classification_files(hashes, 'fake_data/prospective_classification')
 
 # generate config json for prospective evals
 d = {}
